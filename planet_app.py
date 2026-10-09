@@ -18,7 +18,7 @@ from torchvision import models, transforms
 # -------------------------
 CURRENT_VERSION = "3.0.0 beta"
 VERSION_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/version.txt"
-CODE_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/version.txt"
+CODE_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/planet_app.py"
 
 # إعدادات الصفحة
 st.set_page_config(
