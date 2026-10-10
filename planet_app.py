@@ -18,7 +18,7 @@ from torchvision import models, transforms
 # -------------------------
 CURRENT_VERSION = "6.0.0 beta"
 VERSION_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/version.txt"
-CODE_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/planet_app.py"
+GITHUB_API_URL = "https://api.github.com/repos/Major309Robin/Plant-Disease-DetectorUpdater/contents"
 
 # إعدادات الصفحة
 st.set_page_config(
@@ -262,11 +262,11 @@ translations = {
         "no_update": "No, Keep Current",
         "dont_show_again": "Don't show this update again",
         "up_to_date": "Up to date",
-        "updating_msg": "📥 Downloading and applying update...",
+        "updating_msg": "📥 Downloading all files and applying update...",
         "update_success": (
             "✅ Updated successfully! Restarting application..."
         ),
-        "download_fail": "Failed to download update file.",
+        "download_fail": "Failed to download update files.",
     },
     "العربية": {
         "settings": "⚙️ الإعدادات",
@@ -345,11 +345,11 @@ translations = {
         "no_update": "لا، الاحتفاظ بالإصدار الحالي",
         "dont_show_again": "Don't show this update again",
         "up_to_date": "Up to date",
-        "updating_msg": "📥 جاري تحميل وتطبيق التحديث...",
+        "updating_msg": "📥 جاري تحميل جميع الملفات وتطبيق التحديث...",
         "update_success": (
             "✅ تم التحديث بنجاح! جاري إعادة تشغيل التطبيق..."
         ),
-        "download_fail": "فشل في تحميل ملف التحديث.",
+        "download_fail": "فشل في تحميل ملفات التحديث.",
     },
 }
 
@@ -396,40 +396,91 @@ if st.session_state.check_clicked:
                     if st.button(t["yes_update"]):
                         with st.spinner(t["updating_msg"]):
                             try:
-                                code_res = requests.get(CODE_URL, timeout=10)
-                                if code_res.status_code == 200:
+                                repo_res = requests.get(GITHUB_API_URL, timeout=10)
+                                if repo_res.status_code == 200:
+                                    files_data = repo_res.json()
+                                    
                                     current_file_path = os.path.abspath(__file__)
-                                    raw_code = code_res.text
+                                    app_dir = os.path.dirname(current_file_path)
+                                    root_dir = os.path.dirname(app_dir)
                                     
-                                    # تنظيف المسافات والأسطر الفارغة الزائدة
-                                    cleaned_code = "\n".join(
-                                        [
-                                            line
-                                            for line in raw_code.splitlines()
-                                            if line.strip() != ""
+                                    downloaded_files = []
+                                    for file_info in files_data:
+                                        file_name = file_info.get("name")
+                                        download_url = file_info.get("download_url")
+                                        
+                                        if file_name and download_url and file_name != "version.txt" and file_name != "Updater.bat":
+                                            file_res = requests.get(download_url, timeout=10)
+                                            if file_res.status_code == 200:
+                                                if file_name == "planet_app.py":
+                                                    target_dir = app_dir
+                                                else:
+                                                    target_dir = root_dir
+                                                    
+                                                # تحميل بأسماء مؤقتة لكي لا يتعارض مع الملفات الحالية أثناء القراءة
+                                                temp_path = os.path.join(target_dir, f"update_{file_name}")
+                                                real_target_path = os.path.join(target_dir, file_name)
+                                                
+                                                if file_name.endswith(".py"):
+                                                    raw_code = file_res.text
+                                                    cleaned_code = "\n".join(
+                                                        [
+                                                            line
+                                                            for line in raw_code.splitlines()
+                                                            if line.strip() != ""
+                                                        ]
+                                                    )
+                                                    with open(temp_path, "w", encoding="utf-8") as f:
+                                                        f.write(cleaned_code)
+                                                else:
+                                                    with open(temp_path, "wb") as f:
+                                                        f.write(file_res.content)
+                                                        
+                                                downloaded_files.append((temp_path, real_target_path))
+
+                                    if downloaded_files:
+                                        python_w_path = sys.executable.replace("python.exe", "pythonw.exe")
+                                        if not os.path.exists(python_w_path):
+                                            python_w_path = sys.executable
+                                        
+                                        bat_lines = [
+                                            "@echo off",
+                                            "chcp 65001 >nul",
+                                            f'cd /d "{root_dir}"',
+                                            "timeout /t 2 /nobreak >nul"
                                         ]
-                                    )
-                                    
-                                    temp_update_file = "temp_update.py"
-                                    with open(temp_update_file, "w", encoding="utf-8") as f:
-                                        f.write(cleaned_code)
+                                        
+                                        # حذف الملفات القديمة واستبدالها بالملفات الجديدة بنفس الاسم الأصلي مباشرة
+                                        for temp_p, real_p in downloaded_files:
+                                            bat_lines.append(f'if exist "{real_p}" del /f /q "{real_p}"')
+                                            bat_lines.append(f'move /y "{temp_p}" "{real_p}"')
+                                            
+                                        launcher_path = os.path.join(root_dir, "Plant Disease Detector.exe")
+                                        if os.path.exists(launcher_path):
+                                            bat_lines.append(f'start "" "{launcher_path}"')
+                                        else:
+                                            app_script_path = os.path.join(app_dir, "planet_app.py")
+                                            bat_lines.append(f'start /b "" "{python_w_path}" -m streamlit run "{app_script_path}" --server.headless true')
+                                            
+                                        bat_lines.append('del "%~f0"')
+                                        
+                                        updater_bat_content = "\n".join(bat_lines)
+                                        updater_bat_path = os.path.join(root_dir, "Updater.bat")
+                                        
+                                        with open(updater_bat_path, "w", encoding="utf-8") as bat_f:
+                                            bat_f.write(updater_bat_content)
 
-                                    # إنشاء ملف باتش مؤقت لاستبدال الكود وإعادة التشغيل
-                                    bat_content = f"""
-                                    @echo off
-                                    chcp 65001 >nul
-                                    timeout /t 2 /nobreak >nul
-                                    move /y "{temp_update_file}" "{current_file_path}"
-                                    start "" streamlit run "{current_file_path}"
-                                    del "%~f0"
-                                    """
-                                    
-                                    with open("do_update.bat", "w", encoding="utf-8") as bat_f:
-                                        bat_f.write(bat_content)
-
-                                    st.success(t["update_success"])
-                                    os.system("start do_update.bat")
-                                    sys.exit()
+                                        st.success(t["update_success"])
+                                        
+                                        import subprocess
+                                        subprocess.Popen(
+                                            ['cmd.exe', '/c', updater_bat_path],
+                                            creationflags=subprocess.CREATE_NO_WINDOW,
+                                            cwd=root_dir
+                                        )
+                                        sys.exit()
+                                    else:
+                                        st.error(t["download_fail"])
                                 else:
                                     st.error(t["download_fail"])
                             except Exception as e:
