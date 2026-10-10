@@ -16,7 +16,7 @@ from torchvision import models, transforms
 # -------------------------
 # 📌 VERSION & GITHUB CONFIG
 # -------------------------
-CURRENT_VERSION = "4.0.0 beta"
+CURRENT_VERSION = "5.0.0 beta"
 VERSION_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/version.txt"
 CODE_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/planet_app.py"
 
@@ -264,7 +264,7 @@ translations = {
         "up_to_date": "Up to date",
         "updating_msg": "📥 Downloading and applying update...",
         "update_success": (
-            "✅ Updated successfully! Please restart the application."
+            "✅ Updated successfully! Restarting application..."
         ),
         "download_fail": "Failed to download update file.",
     },
@@ -347,7 +347,7 @@ translations = {
         "up_to_date": "Up to date",
         "updating_msg": "📥 جاري تحميل وتطبيق التحديث...",
         "update_success": (
-            "✅ تم التحديث بنجاح! يرجى إعادة تشغيل التطبيق يدوياً."
+            "✅ تم التحديث بنجاح! جاري إعادة تشغيل التطبيق..."
         ),
         "download_fail": "فشل في تحميل ملف التحديث.",
     },
@@ -395,24 +395,45 @@ if st.session_state.check_clicked:
                 with col_u1:
                     if st.button(t["yes_update"]):
                         with st.spinner(t["updating_msg"]):
-                            code_res = requests.get(CODE_URL, timeout=5)
-                            if code_res.status_code == 200:
-                                current_file_path = os.path.abspath(__file__)
-                                raw_code = code_res.text
-                                cleaned_code = "\n".join(
-                                    [
-                                        line
-                                        for line in raw_code.splitlines()
-                                        if line.strip() != ""
-                                    ]
-                                )
-                                with open(
-                                    current_file_path, "w", encoding="utf-8"
-                                ) as f:
-                                    f.write(cleaned_code)
-                                st.success(t["update_success"])
-                            else:
-                                st.error(t["download_fail"])
+                            try:
+                                code_res = requests.get(CODE_URL, timeout=10)
+                                if code_res.status_code == 200:
+                                    current_file_path = os.path.abspath(__file__)
+                                    raw_code = code_res.text
+                                    
+                                    # تنظيف المسافات والأسطر الفارغة الزائدة
+                                    cleaned_code = "\n".join(
+                                        [
+                                            line
+                                            for line in raw_code.splitlines()
+                                            if line.strip() != ""
+                                        ]
+                                    )
+                                    
+                                    temp_update_file = "temp_update.py"
+                                    with open(temp_update_file, "w", encoding="utf-8") as f:
+                                        f.write(cleaned_code)
+
+                                    # إنشاء ملف باتش مؤقت لاستبدال الكود وإعادة التشغيل
+                                    bat_content = f"""
+                                    @echo off
+                                    chcp 65001 >nul
+                                    timeout /t 2 /nobreak >nul
+                                    move /y "{temp_update_file}" "{current_file_path}"
+                                    start "" streamlit run "{current_file_path}"
+                                    del "%~f0"
+                                    """
+                                    
+                                    with open("do_update.bat", "w", encoding="utf-8") as bat_f:
+                                        bat_f.write(bat_content)
+
+                                    st.success(t["update_success"])
+                                    os.system("start do_update.bat")
+                                    sys.exit()
+                                else:
+                                    st.error(t["download_fail"])
+                            except Exception as e:
+                                st.error(f"Update error: {e}")
                 with col_u2:
                     if st.button(t["no_update"]):
                         st.session_state.ignored_version = remote_version
