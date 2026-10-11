@@ -2,7 +2,9 @@ from datetime import datetime
 import glob
 import json
 import os
+import random
 import sys
+import urllib.parse
 import pandas as pd
 from PIL import Image
 import requests
@@ -16,7 +18,7 @@ from torchvision import models, transforms
 # -------------------------
 # 📌 VERSION & GITHUB CONFIG
 # -------------------------
-CURRENT_VERSION = "10.0.0"
+CURRENT_VERSION = "12.7.0"
 VERSION_URL = "https://raw.githubusercontent.com/Major309Robin/Plant-Disease-DetectorUpdater/refs/heads/main/version.txt"
 GITHUB_API_URL = "https://api.github.com/repos/Major309Robin/Plant-Disease-DetectorUpdater/contents"
 
@@ -36,9 +38,49 @@ if not os.path.exists(DB_FOLDER):
     os.makedirs(DB_FOLDER)
 
 # -------------------------
-# 🔑 API KEY FILE HANDLING
+# 🔑 API KEY & USER DB FILE HANDLING
 # -------------------------
 API_KEY_FILE = "Groq API Key.txt"
+USER_DB_PATH = os.path.join(DB_FOLDER, "users.db")
+
+
+def init_user_db():
+    conn = sqlite3.connect(USER_DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE,
+            username TEXT,
+            password TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+init_user_db()
+
+
+def save_user_credentials(email, username, password):
+    conn = sqlite3.connect(USER_DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO users (email, username, password)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET username=excluded.username, password=excluded.password
+        """,
+            (email, username, password),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error saving user: {e}")
+        conn.close()
+        return False
 
 
 def load_saved_api_key():
@@ -59,7 +101,164 @@ def save_api_key_to_file(key):
         print(f"Error saving API key: {e}")
 
 
+# -------------------------
+# 🚪 ONBOARDING / WELCOME GATE (MANDATORY USER CREDENTIALS FIRST)
+# -------------------------
+if "auth_status" not in st.session_state:
+    st.session_state.auth_status = False
+
+if "onboarding_mode" not in st.session_state:
+    st.session_state.onboarding_mode = None
+
+if "sent_code" not in st.session_state:
+    st.session_state.sent_code = None
+
+if "code_sent_status" not in st.session_state:
+    st.session_state.code_sent_status = False
+
 saved_key_init = load_saved_api_key()
+
+if not st.session_state.auth_status and not saved_key_init:
+    st.markdown(
+        """
+        <style>
+        .stApp { background-color: #0e1117; color: #ffffff; }
+        .welcome-card {
+            background-color: #161a25;
+            padding: 40px;
+            border-radius: 15px;
+            border: 1px solid #262730;
+            text-align: center;
+            max-width: 650px;
+            margin: 40px auto;
+        }
+        .groq-link-btn {
+            display: inline-block;
+            background-color: #f55036;
+            color: #ffffff !important;
+            padding: 10px 20px;
+            font-weight: bold;
+            border-radius: 8px;
+            text-decoration: none !important;
+            margin-top: 10px;
+        }
+        </style>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="welcome-card">
+            <h1>🌿 Welcome to Plant Disease Detector</h1>
+            <p>Please enter your account details and choose how to connect your Groq AI Assistant:</p>
+        </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    # خانات تسجيل الإيميل واليوزرنيم والباسورد الإجبارية في البداية لكل الحالات
+    st.markdown("### 🔐 User Credentials Registration (Required)")
+    with st.form(key="mandatory_user_signup_form"):
+        user_email = st.text_input("Email Address:")
+        username = st.text_input("Username:")
+        password = st.text_input("Password:", type="password")
+        submit_user_data = st.form_submit_button(label="Save Credentials 💾")
+
+    if submit_user_data:
+        if user_email and "@" in user_email and username and password:
+            save_user_credentials(user_email.strip(), username.strip(), password.strip())
+            st.success(f"✅ User credentials saved successfully for: {username}")
+        else:
+            st.error("⚠️ Please fill in all user credential fields correctly (Email, Username, Password).")
+
+    st.markdown("---")
+    st.markdown("### Choose Groq Connection Mode:")
+    col_g1, col_g2, col_g3 = st.columns(3)
+
+    with col_g1:
+        if st.button("🔑 I have Groq Key", use_container_width=True):
+            st.session_state.onboarding_mode = "have_key"
+            st.rerun()
+
+    with col_g2:
+        if st.button("📧 I don't have Groq Key", use_container_width=True):
+            st.session_state.onboarding_mode = "no_key"
+            st.session_state.code_sent_status = False
+            st.rerun()
+
+    with col_g3:
+        if st.button("⏭️ Skip", use_container_width=True):
+            st.warning("⚠️ Warning: The app will run without full AI chat features!")
+            st.session_state.auth_status = True
+            st.rerun()
+
+    if st.session_state.onboarding_mode == "have_key":
+        st.markdown("---")
+        st.markdown("### Enter your Groq API Key:")
+        entered_key = st.text_input("API Key", type="password", key="input_groq_k")
+        if st.button("Verify & Continue"):
+            if entered_key.strip():
+                try:
+                    test_headers = {
+                        "Authorization": f"Bearer {entered_key.strip()}",
+                        "Content-Type": "application/json",
+                    }
+                    test_payload = {
+                        "model": "openai/gpt-oss-20b",
+                        "messages": [{"role": "user", "content": "hi"}],
+                    }
+                    res = requests.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=test_headers,
+                        json=test_payload,
+                        timeout=5,
+                    )
+                    if res.status_code in [200, 400]:
+                        save_api_key_to_file(entered_key.strip())
+                        st.success("✅ Key verified successfully!")
+                        st.session_state.auth_status = True
+                        st.rerun()
+                    else:
+                        st.error("❌ Invalid API Key. Please check and try again.")
+                except Exception as e:
+                    save_api_key_to_file(entered_key.strip())
+                    st.session_state.auth_status = True
+                    st.rerun()
+            else:
+                st.error("Please enter a valid key.")
+
+    elif st.session_state.onboarding_mode == "no_key":
+        st.markdown("---")
+        if not st.session_state.code_sent_status:
+            if st.button("Generate Verification Code"):
+                generated_code = str(random.randint(1000, 9999))
+                st.session_state.sent_code = generated_code
+                st.session_state.code_sent_status = True
+                st.success("📥 Verification code generated successfully!")
+                st.rerun()
+        else:
+            st.info(f"🔐 Your Secure Verification Code is: **{st.session_state.sent_code}**")
+            entered_code = st.text_input("Enter 4-digit Verification Code", key="user_code_input")
+            if st.button("Confirm Code & Setup Key"):
+                if entered_code.strip() == str(st.session_state.sent_code):
+                    st.success("✅ Verification successful!")
+                    st.markdown("Get your official Groq API key from Groq Console:")
+                    st.markdown('<a href="https://console.groq.com/keys" target="_blank" class="groq-link-btn">👉 Get Real Groq Key</a>', unsafe_allow_html=True)
+                    
+                    final_groq_input = st.text_input("Paste your Groq Key here (starts with gsk_):", type="password", key="final_gsk")
+                    if st.button("Save & Start Application"):
+                        if final_groq_input.strip().startswith("gsk_"):
+                            save_api_key_to_file(final_groq_input.strip())
+                            st.success("✅ Groq Key Saved Successfully!")
+                            st.session_state.auth_status = True
+                            st.rerun()
+                        else:
+                            st.error("Please enter a valid Groq key starting with gsk_")
+                else:
+                    st.error("❌ Incorrect verification code. Please try again.")
+
+    st.stop()
 
 # -------------------------
 # 🗄️ SQLITE DATABASE SETUP
@@ -193,15 +392,13 @@ translations = {
         "reset": "🔄 Reset / Clear Scans & Archive",
         "faq_title": "💡 Photo Capture FAQ",
         "faq_text": (
-            "1. Ensure good natural lighting.\n2. Focus clearly on the affected"
-            " leaf.\n3. Avoid camera shaking.\n4. Upload JPG or PNG formats."
+            "1. Ensure good natural lighting.\n2. Focus clearly on the affected leaf.\n3. Avoid camera shaking.\n4. Upload JPG or PNG formats."
         ),
         "recent_scans": "📜 Recent Scans",
         "no_scans": "No scans yet.",
         "title": "🌿 Plant Disease Detector",
         "desc": (
-            "Upload a plant image to identify species, detect diseases, and get"
-            " treatment tips."
+            "Upload a plant image to identify species, detect diseases, and get treatment tips."
         ),
         "upload": "Upload Plant Image",
         "uploaded_img": "Uploaded Image",
@@ -213,32 +410,28 @@ translations = {
         "status_healthy": "✅ Healthy & Stable",
         "status_attention": "⚠ Attention Needed",
         "treatment": "💡 Recommended Treatment / Action:",
+        "medicine_recommended": "💊 Recommended Treatment / Medicine:",
+        "buy_btn_text": "Buy 🛒",
         "download_btn": "📥 Download Report (Text)",
         "copy_btn": "📋 Copy Report",
         "copy_success": "Report copied successfully below!",
         "export_csv_btn": "📊 Export Archive as CSV (Excel)",
-        "archive_msg": (
-            "Scan and report securely saved to database and folder:"
-        ),
+        "archive_msg": "Scan and report securely saved to database and folder:",
         "detector_tab": "🌿 Plant Detector",
         "archive_tab": "📁 Database Archive & Search",
         "search_label": "🔍 Search Database (by plant or disease)",
         "filter_status": "Filter by Status",
         "all": "All",
-        "no_archive_files": (
-            "No database records found matching your criteria."
-        ),
+        "no_archive_files": "No database records found matching your criteria.",
         "footer": "Developed by Robin John",
         "ai_chat_title": "🤖 Plant Doctor AI Assistant",
         "ai_chat_intro": (
-            "Ask me anything about this plant and its condition (e.g., How to"
-            " treat it? Can it spread?):"
+            "Ask me anything about this plant and its condition (e.g., How to treat it? Can it spread?):"
         ),
         "ai_placeholder": "Type your question here...",
-        "api_key_label": "🔑 Enter Groq API Key:",
+        "api_key_label": "🔑 Groq API Key:",
         "api_missing": (
-            "Please enter your Groq API Key in the sidebar to chat with the"
-            " Plant Doctor AI."
+            "Please enter your Groq API Key in the sidebar to chat with the Plant Doctor AI."
         ),
         "weather_section": "🌤️ Weather & Season Inspector",
         "city_label": "Enter City / Location",
@@ -246,12 +439,10 @@ translations = {
         "weather_status": "Weather Status",
         "planting_guide_title": "🌱 Seasonal Planting Guide",
         "planting_status_ok": (
-            "✅ Great news! This plant is suitable for planting/growing right"
-            " now in this season."
+            "✅ Great news! This plant is suitable for planting/growing right now in this season."
         ),
         "planting_status_no": (
-            "⚠️ Note: This plant is typically not grown in the current season"
-            " ({season}). Best seasons: {best_seasons}"
+            "⚠️ Note: This plant is typically not grown in the current season ({season}). Best seasons: {best_seasons}"
         ),
         "version_checker_title": "🔄 Version & Update Checker",
         "check_update": "Check Update",
@@ -263,9 +454,7 @@ translations = {
         "dont_show_again": "Don't show this update again",
         "up_to_date": "Up to date",
         "updating_msg": "📥 Downloading all files and applying update...",
-        "update_success": (
-            "✅ Updated successfully! Restarting application..."
-        ),
+        "update_success": "✅ Updated successfully! Restarting application...",
         "download_fail": "Failed to download update files.",
     },
     "العربية": {
@@ -279,15 +468,13 @@ translations = {
         "reset": "🔄 إعادة تعيين / مسح السجلات والأسئلة",
         "faq_title": "💡 Photo Capture FAQ",
         "faq_text": (
-            "1. Ensure good natural lighting.\n2. Focus clearly on the affected"
-            " leaf.\n3. Avoid camera shaking.\n4. Upload JPG or PNG formats."
+            "1. Ensure good natural lighting.\n2. Focus clearly on the affected leaf.\n3. Avoid camera shaking.\n4. Upload JPG or PNG formats."
         ),
         "recent_scans": "📜 الفحوصات الأخيرة",
         "no_scans": "لا توجد فحوصات بعد.",
         "title": "🌿 كشف أمراض النباتات",
         "desc": (
-            "قم برفـع صورة نبات لتحديد نوعه، اكتشاف الأمراض، والحصول على نصائح"
-            " العلاج."
+            "قم برفـع صورة نبات لتحديد نوعه، اكتشاف الأمراض، والحصول على نصائح العلاج."
         ),
         "upload": "رفع صورة النبات",
         "uploaded_img": "الصورة المرفوعة",
@@ -299,6 +486,8 @@ translations = {
         "status_healthy": "✅ سليم ومستقر",
         "status_attention": "⚠ يحتاج إلى اهتمام وعلاج",
         "treatment": "💡 العلاج المقترح / الإجراءات المطلوبة:",
+        "medicine_recommended": "💊 الدواء / المبيد المقترح للعلاج:",
+        "buy_btn_text": "شراء 🛒",
         "download_btn": "📥 تحميل التقرير (ملف نصي)",
         "copy_btn": "📋 نسخ التقرير",
         "copy_success": "تم عرض التقرير للنسخ أدناه بنجاح!",
@@ -311,45 +500,38 @@ translations = {
         "all": "الكل",
         "no_archive_files": "لا توجد سجلات مطابقة للبحث.",
         "footer": "تم التطوير بواسطة روبن جون",
-        "ai_chat_title": "🤖 مساعد طبيب النباتات الذكي (AI)",
+        "ai_chat_title": "🤖 Plant Doctor AI Assistant",
         "ai_chat_intro": (
-            "اسألني عن هذا النبات وحالته (مثل: كيف أعالجه؟ هل ينتشر للنباتات"
-            " المجاورة؟):"
+            "Ask me anything about this plant and its condition (e.g., How to treat it? Can it spread?):"
         ),
-        "ai_placeholder": "اكتب سؤالك هنا...",
-        "api_key_label": "🔑 أدخل مفتاح Groq API:",
+        "ai_placeholder": "Type your question here...",
+        "api_key_label": "🔑 Groq API Key:",
         "api_missing": (
-            "الرجاء إدخال مفتاح الـ API الخاص بـ Groq في الشريط الجانبي لتفعيل"
-            " الشات."
+            "Please enter your Groq API Key in the sidebar to chat with the Plant Doctor AI."
         ),
-        "weather_section": "🌤️ فحص الطقس والفصول",
-        "city_label": "أدخل المدينة أو الموقع",
-        "current_season": "الفصل الحالي",
-        "weather_status": "حالة الطقس",
-        "planting_guide_title": "🌱 دليل الزراعة الموسمية",
+        "weather_section": "🌤️ Weather & Season Inspector",
+        "city_label": "Enter City / Location",
+        "current_season": "Current Season",
+        "weather_status": "Weather Status",
+        "planting_guide_title": "🌱 Seasonal Planting Guide",
         "planting_status_ok": (
-            "✅ أخبار سارة! هذا النبات مناسب للزراعة والنمو في هذا الفصل الآن."
+            "✅ Great news! This plant is suitable for planting/growing right now in this season."
         ),
         "planting_status_no": (
-            "⚠️ تنبيه: هذا النبات لا يزرع عادة في هذا الفصل ({season}). الأصول"
-            " المناسبة لزرعه: {best_seasons}"
+            "⚠️ Note: This plant is typically not grown in the current season ({season}). Best seasons: {best_seasons}"
         ),
         "version_checker_title": "🔄 Version & Update Checker",
         "check_update": "Check Update",
-        "current_v": "الإصدار الحالي",
-        "new_v": "الإصدار الجديد",
-        "update_prompt": (
-            "يتوفر تحديث جديد برقم **{v}**. هل ترغب في التحديث الآن؟"
-        ),
-        "yes_update": "نعم، التحديث الآن",
-        "no_update": "لا، الاحتفاظ بالإصدار الحالي",
+        "current_v": "Current Version",
+        "new_v": "New Version",
+        "update_prompt": "An update to version **{v}** is available. Would you like to update?",
+        "yes_update": "Yes, Update Now",
+        "no_update": "No, Keep Current",
         "dont_show_again": "Don't show this update again",
         "up_to_date": "Up to date",
-        "updating_msg": "📥 جاري تحميل جميع الملفات وتطبيق التحديث...",
-        "update_success": (
-            "✅ تم التحديث بنجاح! جاري إعادة تشغيل التطبيق..."
-        ),
-        "download_fail": "فشل في تحميل ملفات التحديث.",
+        "updating_msg": "📥 Downloading all files and applying update...",
+        "update_success": "✅ Updated successfully! Restarting application...",
+        "download_fail": "Failed to download update files.",
     },
 }
 
@@ -417,7 +599,6 @@ if st.session_state.check_clicked:
                                                 else:
                                                     target_dir = root_dir
                                                     
-                                                # تحميل بأسماء مؤقتة لكي لا يتعارض مع الملفات الحالية أثناء القراءة
                                                 temp_path = os.path.join(target_dir, f"update_{file_name}")
                                                 real_target_path = os.path.join(target_dir, file_name)
                                                 
@@ -450,7 +631,6 @@ if st.session_state.check_clicked:
                                             "timeout /t 2 /nobreak >nul"
                                         ]
                                         
-                                        # حذف الملفات القديمة واستبدالها بالملفات الجديدة بنفس الاسم الأصلي مباشرة
                                         for temp_p, real_p in downloaded_files:
                                             bat_lines.append(f'if exist "{real_p}" del /f /q "{real_p}"')
                                             bat_lines.append(f'move /y "{temp_p}" "{real_p}"')
@@ -501,11 +681,12 @@ if st.session_state.check_clicked:
         st.sidebar.text(t["up_to_date"])
 
 st.sidebar.markdown("---")
+saved_key_current = load_saved_api_key()
 groq_api_key = st.sidebar.text_input(
-    t["api_key_label"], value=saved_key_init, type="password"
+    t["api_key_label"], value=saved_key_current, type="password"
 )
 
-if groq_api_key and groq_api_key != saved_key_init:
+if groq_api_key and groq_api_key != saved_key_current:
     save_api_key_to_file(groq_api_key)
 
 # -------------------------
@@ -559,6 +740,23 @@ if dark_mode:
         align-items: center;
         height: 42px;
     }
+    .buy-btn {
+        display: inline-block;
+        background-color: #ff9900;
+        color: #111111 !important;
+        padding: 10px 22px;
+        font-weight: bold;
+        border-radius: 8px;
+        text-decoration: none !important;
+        border: none !important;
+        box-shadow: none !important;
+        margin-top: 8px;
+    }
+    .buy-btn:hover {
+        background-color: #e68a00;
+        color: #000000 !important;
+        text-decoration: none !important;
+    }
     </style>
     """
 else:
@@ -592,6 +790,23 @@ else:
         display: flex;
         align-items: center;
         height: 42px;
+    }
+    .buy-btn {
+        display: inline-block;
+        background-color: #ff9900;
+        color: #111111 !important;
+        padding: 10px 22px;
+        font-weight: bold;
+        border-radius: 8px;
+        text-decoration: none !important;
+        border: none !important;
+        box-shadow: none !important;
+        margin-top: 8px;
+    }
+    .buy-btn:hover {
+        background-color: #e68a00;
+        color: #000000 !important;
+        text-decoration: none !important;
     }
     </style>
     """
@@ -682,6 +897,128 @@ idx_to_disease = {
     20: "healthy",
 }
 
+plant_images_map = {
+    "Apple": "https://images.unsplash.com/photo-1560806887-1e4cd0b6cbd6?w=500",
+    "Blueberry": "https://images.unsplash.com/photo-1498557850523-fd3d118b962e?w=500",
+    "Cherry_(including_sour)": "https://images.unsplash.com/photo-1528825871115-3581a5387919?w=500",
+    "Corn_(maize)": "https://images.unsplash.com/photo-1551754655-cd27e38d2076?w=500",
+    "Grape": "https://images.unsplash.com/photo-1537640538966-79f369143f8f?w=500",
+    "Orange": "https://images.unsplash.com/photo-1611080626919-7cf5a9dbab5b?w=500",
+    "Peach": "https://images.unsplash.com/photo-1643142371900-3331b255474a?w=500",
+    "Pepper,_bell": "https://images.unsplash.com/photo-1563565375-f3fdfdbefa83?w=500",
+    "Potato": "https://images.unsplash.com/photo-1518977676601-b53f82aba655?w=500",
+    "Raspberry": "https://images.unsplash.com/photo-1577069861033-55d04cec4ef5?w=500",
+    "Soybean": "https://images.unsplash.com/photo-1599599810694-b5b37304c041?w=500",
+    "Squash": "https://images.unsplash.com/photo-1506917728037-b6af01a7d403?w=500",
+    "Strawberry": "https://images.unsplash.com/photo-1464965911861-746a04b4bca6?w=500",
+    "Tomato": "https://images.unsplash.com/photo-1592924357228-91a4daadcfea?w=500",
+}
+
+disease_medicines_en = {
+    "Apple_scab": {
+        "name": "Copper Fungicide Spray",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Fungicide Spray for Plants"
+    },
+    "Bacterial_spot": {
+        "name": "Copper Bactericide Spray",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Copper Fungicide Spray"
+    },
+    "Black_rot": {
+        "name": "Liquid Copper Fungicide",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Fungicide Spray Plants"
+    },
+    "Cedar_apple_rust": {
+        "name": "Plant Rust Fungicide Spray",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Plant Fungicide Spray"
+    },
+    "Cercospora_leaf_spot Gray_leaf_spot": {
+        "name": "Chlorothalonil Fungicide Spray",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Plant Fungicide Spray"
+    },
+    "Common_rust": {
+        "name": "Neem Oil Plant Fungicide",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Neem Oil Spray for Plants"
+    },
+    "Early_blight": {
+        "name": "Copper Fungicide Spray",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Copper Fungicide Spray"
+    },
+    "Esca_(Black_Measles)": {
+        "name": "Systemic Fungicide Spray",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Fungicide Spray"
+    },
+    "Haunglongbing_(Citrus_greening)": {
+        "name": "Citrus Fertilizer & Insecticide",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Citrus Plant Fertilizer"
+    },
+    "Late_blight": {
+        "name": "Mancozeb Copper Bio-Fungicide",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Plant Fungicide Spray"
+    },
+    "Leaf_Mold": {
+        "name": "Organic Neem Oil Spray",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Organic Neem Oil Spray"
+    },
+    "Leaf_blight_(Isariopsis_Leaf_Spot)": {
+        "name": "Copper Bio-Fungicide",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Copper Fungicide Spray"
+    },
+    "Leaf_scorch": {
+        "name": "Plant Micronutrient Booster Spray",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Plant Micronutrient Spray"
+    },
+    "Northern_Leaf_Blight": {
+        "name": "Garden Fungicide Spray",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Garden Fungicide Spray"
+    },
+    "Powdery_mildew": {
+        "name": "Powdery Mildew Neem Oil Spray",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Neem Oil Spray for Plants"
+    },
+    "Septoria_leaf_spot": {
+        "name": "Liquid Copper Fungicide Tomato",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Copper Fungicide Spray"
+    },
+    "Spider_mites Two-spotted_spider_mite": {
+        "name": "Insecticidal Soap / Miticide Spray",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Insecticidal Soap Spray"
+    },
+    "Target_Spot": {
+        "name": "Plant Fungicide Spot Treatment",
+        "image": "https://images.unsplash.com/photo-1585314062340-f1a5a7c9328d?w=500",
+        "search_term": "Plant Fungicide Spray"
+    },
+    "Tomato_Yellow_Leaf_Curl_Virus": {
+        "name": "Whitefly Insecticidal Soap",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Insecticidal Soap Neem Oil"
+    },
+    "Tomato_mosaic_virus": {
+        "name": "Plant Immune Booster Spray",
+        "image": "https://images.unsplash.com/photo-1615485290382-441e4d049cb5?w=500",
+        "search_term": "Plant Booster Spray"
+    }
+}
+
+disease_medicines_ar = disease_medicines_en
+
 plant_seasons = {
     "Apple": ["Spring", "Autumn"],
     "Blueberry": ["Spring", "Summer"],
@@ -701,53 +1038,43 @@ plant_seasons = {
 
 treatment_tips_en = {
     "healthy": (
-        "The plant looks completely healthy! Maintain regular watering and"
-        " standard nutrient care."
+        "The plant looks completely healthy! Maintain regular watering and standard nutrient care."
     ),
     "Early_blight": (
-        "Remove infected lower leaves, avoid overhead watering, and apply a"
-        " copper-based fungicide."
+        "Remove infected lower leaves, avoid overhead watering, and apply a copper-based fungicide."
     ),
     "Late_blight": (
-        "Isolate or destroy infected plants immediately to prevent spread;"
-        " apply appropriate systemic fungicides."
+        "Isolate or destroy infected plants immediately to prevent spread; apply appropriate systemic fungicides."
     ),
     "Bacterial_spot": (
-        "Use disease-free seeds/plants, apply copper sprays, and avoid working"
-        " with wet plants."
+        "Use disease-free seeds/plants, apply copper sprays, and avoid working with wet plants."
     ),
     "Powdery_mildew": (
         "Improve air circulation, apply sulfur-based fungicides or neem oil."
     ),
     "Spider_mites Two-spotted_spider_mite": (
-        "Spray affected leaves with strong water jets or use insecticidal"
-        " soap/neem oil."
+        "Spray affected leaves with strong water jets or use insecticidal soap/neem oil."
     ),
 }
 
 treatment_tips_ar = {
     "healthy": (
-        "النبات يبدو سليماً تماماً! حافظ على الري المنتظم والعناية القياسية"
-        " بالمغذيات."
+        "النبات يبدو سليماً تماماً! حافظ على الري المنتظم والعناية القياسية بالمغذيات."
     ),
     "Early_blight": (
-        "قم بإزالة الأوراق السفلى المصابة، وتجنب الري العلوي، واستخدم مبيد فطري"
-        " نحاسي."
+        "قم بإزالة الأوراق السفلى المصابة، وتجنب الري العلوي، واستخدم مبيد فطري نحاسي."
     ),
     "Late_blight": (
-        "عزل أو التخلص من النباتات المصابة فوراً لمنع الانتشار؛ وتطبيق مبيدات"
-        " فطرية جهازية مناسبة."
+        "عزل أو التخلص من النباتات المصابة فوراً لمنع الانتشار؛ وتطبيق مبيدات فطرية جهازية مناسبة."
     ),
     "Bacterial_spot": (
-        "استخدم بذور/نباتات خالية من الأمراض، ورش مبيدات نحاسية، وتجنب التعامل مع"
-        " النباتات وهي مبللة."
+        "استخدم بذور/نباتات خالية من الأمراض، ورش مبيدات نحاسية، وتجنب التعامل مع النباتات وهي مبللة."
     ),
     "Powdery_mildew": (
         "تحسين التهوية، وتطبيق مبيدات فطرية تعتمد على الكبريت أو زيت النيم."
     ),
     "Spider_mites Two-spotted_spider_mite": (
-        "رش الأوراق المصابة بتيارات مياه قوية أو استخدام صابون مبيد للحشرات أو"
-        " زيت النيم."
+        "رش الأوراق المصابة بتيارات مياه قوية أو استخدام صابون مبيد للحشرات أو زيت النيم."
     ),
 }
 
@@ -892,6 +1219,11 @@ with tab1:
         )
         tip = tips_dict.get(detected_disease, "Monitor plant closely.")
 
+        medicines_dict = disease_medicines_ar if selected_lang == "العربية" else disease_medicines_en
+        recommended_medicine_name = "None"
+        if not is_healthy and detected_disease in medicines_dict:
+            recommended_medicine_name = medicines_dict[detected_disease]["name"]
+
         best_seasons_list = plant_seasons.get(detected_plant, ["Spring", "Summer"])
         is_season_match = any(
             s.lower() in current_season_name.lower() for s in best_seasons_list
@@ -905,21 +1237,45 @@ with tab1:
                 best_seasons=", ".join(best_seasons_list),
             )
 
+        plant_img_url = plant_images_map.get(detected_plant, "https://images.unsplash.com/photo-1518531933037-91b2f5f229cc?w=500")
+
         with st.container(border=True):
             st.markdown(f"### 🌱 {t['report_title']}")
-            st.markdown(
-                f"**{t['plant_type']}:** {detected_plant} ({p_confidence:.2f}%)"
-            )
-            st.markdown(
-                f"**{t['condition']}:** {detected_disease} ({d_confidence:.2f}%)"
-            )
-            st.markdown(f"**{t['status']}:** {status_icon}")
-            st.markdown("---")
-            st.markdown(
-                f"**{t['planting_guide_title']}:**\n\n{season_advice_msg}"
-            )
-            st.markdown("---")
-            st.markdown(f"**{t['treatment']}**\n\n{tip}")
+            
+            col_rep1, col_rep2 = st.columns([2, 1])
+            with col_rep1:
+                st.markdown(
+                    f"**{t['plant_type']}:** {detected_plant} ({p_confidence:.2f}%)"
+                )
+                st.markdown(
+                    f"**{t['condition']}:** {detected_disease} ({d_confidence:.2f}%)"
+                )
+                st.markdown(f"**{t['status']}:** {status_icon}")
+                st.markdown("---")
+                st.markdown(
+                    f"**{t['planting_guide_title']}:**\n\n{season_advice_msg}"
+                )
+                st.markdown("---")
+                st.markdown(f"**{t['treatment']}**\n\n{tip}")
+                if not is_healthy and recommended_medicine_name != "None":
+                    st.markdown(f"**{t['medicine_recommended']}** {recommended_medicine_name}")
+            
+            with col_rep2:
+                st.image(plant_img_url, caption=f"🌿 {detected_plant}", use_container_width=True)
+
+            if not is_healthy and detected_disease in medicines_dict:
+                med_info = medicines_dict[detected_disease]
+                amazon_search_query = urllib.parse.quote(med_info["search_term"])
+                amazon_url = f"https://www.amazon.com/s?k={amazon_search_query}"
+
+                st.markdown("---")
+                st.markdown(f"### {t['medicine_recommended']}")
+                col_m1, col_m2 = st.columns([1, 2])
+                with col_m1:
+                    st.image(med_info["image"], caption=med_info["name"], width=180)
+                with col_m2:
+                    st.markdown(f"**💊 {med_info['name']}**")
+                    st.markdown(f'<a href="{amazon_url}" target="_blank" class="buy-btn">{t["buy_btn_text"]}</a>', unsafe_allow_html=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive_img_path = os.path.join(ARCHIVE_DIR, f"scan_{timestamp}.png")
@@ -934,6 +1290,7 @@ Detected Disease/Status: {detected_disease} ({d_confidence:.2f}%)
 Status: {status_str}
 Seasonal Guide: {season_advice_msg}
 Treatment Advice: {tip}
+Recommended Medicine: {recommended_medicine_name}
 ------------------------------------
 Generated by Robin John
 """
@@ -1020,15 +1377,14 @@ Generated by Robin John
                                     {
                                         "role": "system",
                                         "content": (
-                                            "You are an expert agricultural"
-                                            " engineer and plant doctor AI"
-                                            " assistant. Detected Plant:"
+                                            "You are an expert agricultural engineer and plant doctor AI assistant. Detected Plant:"
                                             f" {detected_plant}, Condition:"
                                             f" {detected_disease}, Status:"
                                             f" {status_str}, Weather:"
                                             f" {weather_info_text}, Season:"
                                             f" {current_season_name},"
-                                            f" Treatment: {tip}"
+                                            f" Treatment: {tip}, Medicine:"
+                                            f" {recommended_medicine_name}"
                                         ),
                                     }
                                 ]
@@ -1058,8 +1414,7 @@ Generated by Robin John
                                 )
                             else:
                                 st.error(
-                                    f"Groq API Error ({response.status_code}):"
-                                    f" {response.text}"
+                                    f"Groq API Error ({response.status_code}): {response.text}"
                                 )
 
                         except Exception as e:
@@ -1071,23 +1426,18 @@ with tab2:
     conn = sqlite3.connect(DB_NAME)
     try:
         df_archive = pd.read_sql_query(
-            "SELECT timestamp, plant_name, disease_name, plant_conf,"
-            " disease_conf, status, weather_info, season_info, image_path FROM"
-            " scans ORDER BY id DESC",
+            "SELECT timestamp, plant_name, disease_name, plant_conf, disease_conf, status, weather_info, season_info, image_path FROM scans ORDER BY id DESC",
             conn,
         )
     except:
         df_archive = pd.read_sql_query(
-            "SELECT timestamp, plant_name, disease_name, plant_conf,"
-            " disease_conf, status, image_path FROM scans ORDER BY id DESC",
+            "SELECT timestamp, plant_name, disease_name, plant_conf, disease_conf, status, image_path FROM scans ORDER BY id DESC",
             conn,
         )
 
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, timestamp, plant_name, disease_name, plant_conf,"
-        " disease_conf, status, image_path, report_text, chat_history FROM scans"
-        " ORDER BY id DESC"
+        "SELECT id, timestamp, plant_name, disease_name, plant_conf, disease_conf, status, image_path, report_text, chat_history FROM scans ORDER BY id DESC"
     )
     rows = cursor.fetchall()
     conn.close()
